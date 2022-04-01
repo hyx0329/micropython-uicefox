@@ -33,17 +33,20 @@ async def open_connection(host, port, ssl=False):
 	return ss, ss
 
 
-class Response:
+class BaseResponse:
 	status = -1
 	headers = None
-	content_length = 0
 
 	def __init__(self, reader):
 		self._reader = reader
+
+
+class Response(BaseResponse):
+	content_length = None
 	
-	async def read(self, size=None):
+	async def read(self, size=-1):
 		# must limit or ECONNRESET
-		if size:
+		if size != -1:
 			size = min(self.content_length, size)
 		else:
 			size = self.content_length
@@ -64,10 +67,10 @@ class Response:
 		return "<%s %d %s>" % (self.__name__, self.status, self.headers)
 
 
-class ChunkedResponse(Response):
+class ChunkedResponse(BaseResponse):
 	chunk_size = 0
 
-	async def read(self, size=4 * 1024):
+	async def read(self, size=-1):
 		if self.chunk_size == 0:
 			l = await self._reader.readline()
 			l = l.split(b';', 1)[0]
@@ -77,15 +80,47 @@ class ChunkedResponse(Response):
 				sep = await self._reader.read(2)
 				assert sep == b'\r\n'
 				return b''
-		data = await self._reader.read(min(size, self.chunk_size))
+		if size != -1:
+			data = await self._reader.read(min(size, self.chunk_size))
+		else:
+			data = await self._reader.read(self.chunk_size)
 		self.chunk_size -= len(data)
 		if self.chunk_size == 0:
 			sep = await self._reader.read(2)
 			assert sep == b'\r\n'
 		return data
 	
+	async def readline(self):
+		raise NotImplementedError()
+	
+	async def readinto(self, buf):
+		raise NotImplementedError()
 
-async def request_raw(method, url, data=None, json=None, headers=None, data_producer=None, data_length=None, ua=None):
+
+class ChunkedWriter:
+	def __init__(self, writer):
+		self._writer = writer
+
+	async def write(self, buf, offset=0, size=-1):
+		if offset != 0 or size != -1:
+			buf = memoryview(buf)
+			if size != -1:
+				size = len(buf)
+			buf = buf[offset : offset + size]
+		chunk_size = len(buf)
+		assert chunk_size > 0
+		self._writer.write(b'%x' % chunk_size)
+		self._writer.write(b'\r\n')
+		self._writer.write(buf)
+		await self._writer.drain()
+	
+	async def close(self):
+		self._writer.write(b'0\r\n\r\n')
+		await self._writer.drain()
+		self._writer = None
+
+
+async def request_raw(method, url, data=None, json=None, headers=None, ua=None):
 	try:
 		proto, _, host, path = url.split("/", 3)
 	except ValueError:
@@ -107,34 +142,29 @@ async def request_raw(method, url, data=None, json=None, headers=None, data_prod
 		method,path,host,
 		ua if ua else USER_AGENT
 	)
-	buf = memoryview(query.encode('utf-8'))
+	buf = memoryview(query)
 	wrt.write(buf)
 	await wrt.drain()
 	if headers:
 		for k in headers:
-			wrt.write(memoryview(k.encode('utf-8')))
-			wrt.write(memoryview(b": "))
-			wrt.write(memoryview(headers[k]))
-			wrt.write(memoryview(b"\r\n"))
+			wrt.write(k)
+			wrt.write(b": ")
+			wrt.write(headers[k])
+			wrt.write(b"\r\n")
 			await s.drain()
 	if json:
 		assert data is None
 		import ujson
-		wrt.write(memoryview(b"Content-Type: application/json\r\n"))
+		wrt.write(b"Content-Type: application/json\r\n")
 		data = ujson.dumps(json).encode('utf-8')
-	if data_producer:
-		assert data is None
-		assert data_length is not None
-		raise NotImplementedError()
-	if data:
-		wrt.write(memoryview(b"Content-Length: %d\r\n" % len(data)))
+	elif data:
+		wrt.write(b"Content-Length: %d\r\n" % len(data))
 	wrt.write(b"\r\n")
 	await wrt.drain()
+	# TODO: chunked upload
 	if data:
 		wrt.write(data)
 		await wrt.drain()
-	if data_producer:
-		pass
 	return rd
 
 
