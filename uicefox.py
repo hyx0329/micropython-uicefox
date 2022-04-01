@@ -4,10 +4,6 @@ from uasyncio.stream import Stream
 import usocket as socket
 
 
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:66.0) Gecko/20100101 Firefox/66.0"
-# USER_AGENT = "curl/7.82.0"
-
-
 async def open_connection(host, port, ssl=False):
 	from uerrno import EINPROGRESS, ENOTCONN
 	ai = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)[0]  # TODO this is blocking!
@@ -120,7 +116,7 @@ class ChunkedWriter:
 		self._writer = None
 
 
-async def request_raw(method, url, data=None, json=None, headers=None, ua=None):
+async def request_raw(method, url, data=None, json=None, headers=None, ua=None, chunked=False):
 	try:
 		proto, _, host, path = url.split("/", 3)
 	except ValueError:
@@ -140,7 +136,7 @@ async def request_raw(method, url, data=None, json=None, headers=None, ua=None):
 	rd, wrt = await open_connection(host, port, proto != "http:")
 	query = "%s /%s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n\r\n" % (
 		method,path,host,
-		ua if ua else USER_AGENT
+		ua if ua else "Mozilla/5.0 (X11; Linux x86_64; rv:66.0) Gecko/20100101 Firefox/66.0"
 	)
 	buf = memoryview(query)
 	wrt.write(buf)
@@ -157,15 +153,20 @@ async def request_raw(method, url, data=None, json=None, headers=None, ua=None):
 		import ujson
 		wrt.write(b"Content-Type: application/json\r\n")
 		data = ujson.dumps(json).encode('utf-8')
-	elif data:
+	elif chunked:
+		assert data is None
+		wrt.write(b"Transfer-Encoding: chunked")
+	if data:
 		wrt.write(b"Content-Length: %d\r\n" % len(data))
 	wrt.write(b"\r\n")
 	await wrt.drain()
-	# TODO: chunked upload
+	# TODO: handle chunked upload
 	if data:
 		wrt.write(data)
 		await wrt.drain()
-	return rd
+	if chunked:
+		return ChunkedWriter(writer), rd
+	return None, rd
 
 
 async def request(method, url, *args, redir_limit=2, **kwargs):
@@ -173,7 +174,7 @@ async def request(method, url, *args, redir_limit=2, **kwargs):
 	redir_url = None
 	# process headers and redirs
 	while True:
-		reader = await request_raw(method,url,*args,**kwargs)
+		_, reader = await request_raw(method,url,*args,**kwargs)
 		headers = []
 		sline = await reader.readline()
 		status = int(sline.split(None,2)[1])
