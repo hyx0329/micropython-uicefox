@@ -20,6 +20,10 @@ The code tells everything. Docs are not planned for the moment.
 
 Better to "close" the response object (call `await resp.close()`), I don't know what will happen if not.
 
+## TODO
+
+- [ ] chunked request
+
 ## About the name
 
 I use Firefox's UA, so I call it `icefox`, but add `u` as prefix following the conventions. It looks like `nicefox`, isn't it?
